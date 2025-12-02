@@ -31,15 +31,41 @@ ARTIST_COL = "artists"
 N_NEIGHBORS = 5
 METRIC = "euclidean"
 
+# Feature weights: make some features count more in distance
+# 1.0 = default importance. Increase to emphasize a feature.
+FEATURE_WEIGHTS: dict[str, float] = {
+    "tempo": 2.5,          # beat / BPM matters more
+    "energy": 1.5,         # louder/more intense vs calm
+    "danceability": 1.3,   # how easy it is to dance to
+    # other features fall back to 1.0
+}
+
+
+def apply_feature_weights(X_scaled: np.ndarray, feature_columns: list[str]) -> np.ndarray:
+    """
+    Multiply selected feature dimensions by their weights *after* scaling.
+    This effectively makes these features more important in Euclidean distance.
+    """
+    Xw = X_scaled.copy()
+    for i, col in enumerate(feature_columns):
+        w = FEATURE_WEIGHTS.get(col, 1.0)
+        if w != 1.0:
+            Xw[:, i] *= w
+    return Xw
+
+
 # ==== CORE MODEL BUILDING ====
+
 
 def load_and_prepare(csv_path: str = CSV_PATH) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
-    available_features = [c for c in FEATURE_COLUMNS if c in df.columns]
-    if not available_features:
+    missing_cols = [c for c in FEATURE_COLUMNS if c not in df.columns]
+    if missing_cols:
         raise ValueError(
-            "None of the FEATURE_COLUMNS are present. "
+            f"Expected numeric feature columns {FEATURE_COLUMNS}, "
+            f"but the following are missing: {missing_cols}. "
+            f"Check that your data.csv has these columns and that FEATURE_COLUMNS are present. "
             f"Found columns: {list(df.columns)[:20]} ..."
         )
 
@@ -47,7 +73,7 @@ def load_and_prepare(csv_path: str = CSV_PATH) -> pd.DataFrame:
         if col not in df.columns:
             raise ValueError(f"Expected column '{col}' not found in CSV.")
 
-    df = df.dropna(subset=available_features).copy()
+    df = df.dropna(subset=FEATURE_COLUMNS).copy()
     df = df.drop_duplicates(subset=[TITLE_COL, ARTIST_COL]).reset_index(drop=True)
 
     return df
@@ -59,10 +85,15 @@ def fit_scaler_and_knn(
     metric: str = METRIC,
 ) -> tuple[StandardScaler, NearestNeighbors, np.ndarray]:
 
-    X = df[[c for c in FEATURE_COLUMNS if c in df.columns]].copy()
+    # Use only the feature columns that actually exist in this CSV
+    feature_columns = [c for c in FEATURE_COLUMNS if c in df.columns]
+    X = df[feature_columns].copy()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+
+    # Apply feature weights so tempo / energy / danceability matter more
+    X_scaled = apply_feature_weights(X_scaled, feature_columns)
 
     knn = NearestNeighbors(n_neighbors=n_neighbors, metric=metric)
     knn.fit(X_scaled)
@@ -80,7 +111,9 @@ def build_model(
     scaler, knn, X_scaled = fit_scaler_and_knn(df, n_neighbors=n_neighbors, metric=metric)
     return df, scaler, knn, X_scaled
 
+
 # ==== LOOKUP UTILITIES ====
+
 
 def find_track_index(
     df: pd.DataFrame,
@@ -96,26 +129,25 @@ def find_track_index(
 
     if len(candidates) == 0:
         titles = df[TITLE_COL].astype(str).tolist()
-        close = get_close_matches(title, titles, n=1, cutoff=0.8)
-        if not close:
-            return None
-        match_title = close[0]
-        idx = df.index[df[TITLE_COL] == match_title]
-        return int(idx[0]) if len(idx) > 0 else None
+        close = get_close_matches(title, titles, n=3, cutoff=0.6)
+        msg = f"No track found matching title '{title}'"
+        if artist:
+            msg += f" and artist '{artist}'"
+        if close:
+            msg += f". Did you mean: {', '.join(close)}?"
+        print(msg)
+        return None
 
-    if len(candidates) == 1:
-        return int(candidates.index[0])
-
-    exact = df[
-        (df[TITLE_COL].str.casefold() == title.casefold())
-        & (df[ARTIST_COL].str.casefold() == (artist or "").casefold())
-    ]
-    if len(exact) == 1:
-        return int(exact.index[0])
+    if len(candidates) > 1:
+        print(f"Multiple matches found for '{title}':")
+        print(candidates[[TITLE_COL, ARTIST_COL]].head())
+        print("Taking the first match. You may want to specify an artist.")
 
     return int(candidates.index[0])
 
+
 # ==== RECOMMENDATION FUNCTIONS ====
+
 
 def recommend_similar_songs(
     df: pd.DataFrame,
@@ -160,6 +192,11 @@ def user_vector_from_likes(
     X_like = np.vstack(feats)
     X_like_df = pd.DataFrame(X_like, columns=FEATURE_COLUMNS)
     X_like_scaled = scaler.transform(X_like_df)
+
+    # Apply the same feature weights used to train the KNN model
+    X_like_scaled = apply_feature_weights(X_like_scaled, FEATURE_COLUMNS)
+
+    # Final user vector is the (weighted, scaled) average of liked tracks
     return X_like_scaled.mean(axis=0)
 
 
@@ -180,9 +217,12 @@ def recommend_for_user(
     user_vec = user_vector_from_likes(df, scaler, liked_tracks)
     distances, indices = knn.kneighbors([user_vec])
 
-    liked_set = {(t.casefold(), (a or "").casefold()) for t, a in liked_tracks}
-    artist_counts: dict[str, int] = {}
+    liked_set = {
+        (title.casefold(), (artist or "").casefold()) for title, artist in liked_tracks
+    }
+
     recs: list[tuple[int, float]] = []
+    artist_counts: dict[str, int] = {}
 
     for dist, local_idx in zip(distances[0], indices[0]):
         idx = int(local_idx)
@@ -229,39 +269,3 @@ def recommend_for_user(
     return out.reset_index(drop=True)
 
 
-if __name__ == "__main__":
-    df, scaler, knn, X_scaled = build_model()
-
-    QUERY_TITLE = "Back In Black"
-    QUERY_ARTIST = "AC/DC"
-
-    try:
-        print(f"\nSimilar songs to: {QUERY_TITLE} — {QUERY_ARTIST}\n")
-        recs_song = recommend_similar_songs(
-            df, scaler, knn, X_scaled, QUERY_TITLE, QUERY_ARTIST, top_k=10
-        )
-        print(recs_song.to_string(index=False))
-    except ValueError as e:
-        print("Song-to-song:", e)
-
-    LIKED = [
-        ("Back In Black", "AC/DC"),
-        ("Thunderstruck", "AC/DC"),
-        ("Highway to Hell", "AC/DC"),
-    ]
-
-    try:
-        print(f"\nRecommendations for user (liked: {', '.join([t for t, _ in LIKED])})\n")
-        recs_user = recommend_for_user(
-            df,
-            scaler,
-            knn,
-            X_scaled,
-            LIKED,
-            top_k=10,
-            max_per_artist=2,
-            min_popularity=40,
-        )
-        print(recs_user.to_string(index=False))
-    except ValueError as e:
-        print("User-based:", e)

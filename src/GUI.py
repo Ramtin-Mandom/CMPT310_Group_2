@@ -98,7 +98,7 @@ class RecommenderWindow(QWidget):
         row_title.addWidget(lbl_title)
 
         self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText("e.g., Back In Black")
+        self.title_edit.setPlaceholderText("e.g.,  Love Train")
         row_title.addWidget(self.title_edit)
 
         layout.addLayout(row_title)
@@ -148,7 +148,7 @@ class RecommenderWindow(QWidget):
         input_row.addWidget(lbl_liked_title)
 
         self.liked_title_edit = QLineEdit()
-        self.liked_title_edit.setPlaceholderText("e.g., Back In Black")
+        self.liked_title_edit.setPlaceholderText("e.g., Love Train")
         input_row.addWidget(self.liked_title_edit)
 
         lbl_liked_artist = QLabel("Artist (optional):")
