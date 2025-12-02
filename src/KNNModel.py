@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 # ==== CONFIG ====
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CSV_PATH = os.path.join(BASE_DIR, "data", "data.csv")
+CSV_PATH = os.path.join(BASE_DIR, "Data", "data.csv")
 
 # Numeric audio feature columns
 FEATURE_COLUMNS = [
